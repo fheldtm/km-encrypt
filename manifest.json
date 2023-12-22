@@ -1,0 +1,11 @@
+{
+	"id": "km-encrypt",
+	"name": "km-encrypt",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "kkamng's Personal Encryption Plugin",
+	"author": "@kkamang",
+	"authorUrl": "",
+	"fundingUrl": "",
+	"isDesktopOnly": false
+}
