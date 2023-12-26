@@ -7,6 +7,11 @@ import {
 	Plugin
 } from 'obsidian';
 
+const encryptedCacheDatas = {
+	title: '',
+	content: ''
+}
+
 const encrypt = (text: string, password: string): string => {
 	const algorithm = 'aes-256-ctr';
 	const iv = crypto.randomBytes(16);
@@ -29,14 +34,6 @@ const decrypt = (hash: string, password: string): string => {
 	}
 }
 
-const currentNoteMeta = {
-	isEncrypt: false,
-	encryptedAt: '',
-	encryptedTitle: '',
-	encryptPassword: '',
-	update: () => {}
-}
-
 export default class MyPlugin extends Plugin {
 	async onload() {
 		// This creates an icon in the left ribbon.
@@ -52,10 +49,6 @@ export default class MyPlugin extends Plugin {
 		});
 		// Perform additional things with the ribbon
 		decryptRibbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
 
 		this.addCommand({
 			id: 'Encrypt Note',
@@ -78,145 +71,30 @@ export default class MyPlugin extends Plugin {
 				new DecryptPasswordModal(this.app).open();
 			})
 		);
+
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => {
+				onFileModify(this.app);
+			})
+		);
 	}
 
 	onunload() {
 	}
 }
 
-class EncryptOrDecryptModal extends Modal {
-	constructor(app: App) {
-		super(app)
-	}
-
-	checkNoteIsEncrypted(): boolean {
-		const activeLeaf = this.app.workspace.getLeaf();
-		if (!activeLeaf) {
-			return false;
-		}
-
-		const view = activeLeaf.view;
-		if (!(view instanceof MarkdownView)) {
-			return false;
-		}
-
-		const doc = view.editor.getDoc();
-		const noteContent = doc.getValue();
-
-		// 위에서 2, 4줄(meta data)을 확인
-		const lines = noteContent?.split('\n');
-		const isEncrypt = lines?.[1]?.includes('km-encrypted: true') || false;
-
-		return isEncrypt;
-	}
-
-	getNoteEncryptedInfo() {
-		const failResult = {
-			isEncrypt: false,
-			encryptedAt: '',
-			encryptedTitle: ''
-		};
-
-		const activeLeaf = this.app.workspace.getLeaf();
-		if (!activeLeaf) {
-			return failResult;
-		}
-
-		const view = activeLeaf.view;
-		if (!(view instanceof MarkdownView)) {
-			return failResult;
-		}
-
-		const doc = view.editor.getDoc();
-		const noteContent = doc.getValue();
-
-		// 위에서 2, 4줄(meta data)을 확인
-		const lines = noteContent.split('\n');
-		const isEncrypt = lines?.[1]?.includes('km-encrypted: true') || false;
-		if (isEncrypt === false) {
-			return failResult;
-		}
-
-		const encryptedAt = lines?.[2]?.split('encryptedAt: ')?.[1] || '';
-		const encryptedTitle = lines?.[3]?.split('title: ')?.[1] || '';
-
-		return {
-			isEncrypt,
-			encryptedAt,
-			encryptedTitle
-		};
-	}
-
-	async EncryptNote(encryptKey: string) {
-		// Get the current active leaf
-		const activeLeaf = this.app.workspace.getLeaf();
-		if (!activeLeaf) {
-			this.close();
-			return;
-		}
-
-		// If there's an active leaf, get its content
-		const view = activeLeaf.view;
-		if (!(view instanceof MarkdownView)) {
-			this.close();
-			return;
-		}
-
-		const noteTitle = view.file?.basename;
-
-		const doc = view.editor.getDoc();
-		const noteContent = doc.getValue();
-
-		const password = encryptKey;
-
-		const encryptedTitle = encrypt(noteTitle || '', password);
-		const encryptedContent = encrypt(noteContent, password);
-
-		const now = new Date();
-		const koreaTime = new Date(now.getTime() + (9 * 60 * 60 * 1000));
-		const encryptInfo = {
-			encryptedAt: koreaTime.toISOString(),
-			title: encryptedTitle
-		}
-		let newNoteContent = '---\n';
-		newNoteContent += `km-encrypted: true\n`;
-		newNoteContent += `encryptedAt: ${encryptInfo.encryptedAt}\n`;
-		newNoteContent += `title: ${encryptInfo.title}\n`;
-		newNoteContent += `---\n`;
-		newNoteContent += `${encryptedContent}`;
-
-		if (view.file) {
-			await this.app.vault.modify(view.file, newNoteContent);
-		}
-	}
-
-	checkIsMarkdownFile() {
-		const activeLeaf = this.app.workspace.getLeaf();
-		if (!activeLeaf) {
-			return false;
-		}
-
-		const view = activeLeaf.view;
-		if (!(view instanceof MarkdownView)) {
-			return false;
-		}
-
-		return true;
-	}
-}
-
-class FirstEncryptModal extends EncryptOrDecryptModal {
+class FirstEncryptModal extends Modal {
 	constructor(app: App) {
 		super(app);
 	}
 
   async onOpen() {
-		if (this.checkIsMarkdownFile() === false) {
+		if (checkIsMarkdownFile(this.app) === false) {
 			this.close();
 			return;
 		}
 
-		if (this.checkNoteIsEncrypted()) {
+		if (checkNoteIsEncrypted(this.app)) {
 			new Notice('This note is already encrypted');
 			this.close();
 			return;
@@ -263,7 +141,11 @@ class FirstEncryptModal extends EncryptOrDecryptModal {
 				return;
 			}
 
-			this.EncryptNote(encryptKey);
+			const encrypted = await EncryptNote(this.app, encryptKey);
+			if (encrypted.status === 'fail') {
+				this.close();
+				return;
+			}
 
 			this.close();
 		});
@@ -271,7 +153,7 @@ class FirstEncryptModal extends EncryptOrDecryptModal {
 }
 
 // 해당 파일이 암호화된 파일이면 열리는 모달
-class DecryptPasswordModal extends EncryptOrDecryptModal {
+class DecryptPasswordModal extends Modal {
 	passwordFailCount = 1;
 	isSuccessDecrypt = false;
 
@@ -280,19 +162,19 @@ class DecryptPasswordModal extends EncryptOrDecryptModal {
 	}
 
   async onOpen() {
-		if (this.checkIsMarkdownFile() === false) {
+		if (checkIsMarkdownFile(this.app) === false) {
 			this.close();
 			return;
 		}
 
 		// 암호화 된 파일인지 확인
-		const isEncrypt = this.checkNoteIsEncrypted();
+		const isEncrypt = checkNoteIsEncrypted(this.app);
 		if (isEncrypt === false) {
 			this.close();
 			return;
 		}
 
-		const metaInfo = this.getNoteEncryptedInfo();
+		const metaInfo = getNoteEncryptedInfo(this.app);
 		const encryptedTitle = metaInfo.encryptedTitle;
 
 		// Get the current active leaf
@@ -361,13 +243,6 @@ class DecryptPasswordModal extends EncryptOrDecryptModal {
 				return;
 			}
 
-			// 복호화 성공
-			// 현재 열려있는 노트의 암호화 정보 저장
-			currentNoteMeta.encryptedAt = metaInfo.encryptedAt;
-			currentNoteMeta.encryptedTitle = metaInfo.encryptedTitle;
-			currentNoteMeta.isEncrypt = metaInfo.isEncrypt;
-			currentNoteMeta.encryptPassword = password;
-
 			// 기존 메타 정보 제거
 			const noteContent = noteContentWithMeta.split('\n').slice(5).join('\n');
 			const decryptedContent = decrypt(noteContent, password);
@@ -382,7 +257,7 @@ class DecryptPasswordModal extends EncryptOrDecryptModal {
 
 	async onClose() {
 		// 해당 파일이 암호화된 파일이 아니면 종료
-		if (this.checkNoteIsEncrypted() === false) {
+		if (checkNoteIsEncrypted(this.app) === false) {
 			return;
 		}
 		
@@ -404,4 +279,144 @@ class DecryptPasswordModal extends EncryptOrDecryptModal {
 			activeLeaf.detach();
 		}
 	}
+}
+
+const checkNoteIsEncrypted = (app: App): boolean => {
+	const activeLeaf = app.workspace.getLeaf();
+	if (!activeLeaf) {
+		return false;
+	}
+
+	const view = activeLeaf.view;
+	if (!(view instanceof MarkdownView)) {
+		return false;
+	}
+
+	const doc = view.editor.getDoc();
+	const noteContent = doc.getValue();
+
+	// 위에서 2, 4줄(meta data)을 확인
+	const lines = noteContent?.split('\n');
+	const isEncrypt = lines?.[1]?.includes('km-encrypted: true') || false;
+
+	return isEncrypt;
+}
+
+const getNoteEncryptedInfo = (app: App) => {
+	const failResult = {
+		isEncrypt: false,
+		encryptedAt: '',
+		encryptedTitle: ''
+	};
+
+	const activeLeaf = app.workspace.getLeaf();
+	if (!activeLeaf) {
+		return failResult;
+	}
+
+	const view = activeLeaf.view;
+	if (!(view instanceof MarkdownView)) {
+		return failResult;
+	}
+
+	const doc = view.editor.getDoc();
+	const noteContent = doc.getValue();
+
+	// 위에서 2, 4줄(meta data)을 확인
+	const lines = noteContent.split('\n');
+	const isEncrypt = lines?.[1]?.includes('km-encrypted: true') || false;
+	if (isEncrypt === false) {
+		return failResult;
+	}
+
+	const encryptedAt = lines?.[2]?.split('encryptedAt: ')?.[1] || '';
+	const encryptedTitle = lines?.[3]?.split('title: ')?.[1] || '';
+
+	return {
+		isEncrypt,
+		encryptedAt,
+		encryptedTitle
+	};
+}
+
+const EncryptNote = async (app: App, encryptKey: string) => {
+	// Get the current active leaf
+	const activeLeaf = app.workspace.getLeaf();
+	if (!activeLeaf) {
+		return {
+			status: 'fail'
+		};
+	}
+
+	// If there's an active leaf, get its content
+	const view = activeLeaf.view;
+	if (!(view instanceof MarkdownView)) {
+		return {
+			status: 'fail'
+		};
+	}
+
+	const noteTitle = view.file?.basename;
+
+	const doc = view.editor.getDoc();
+	const noteContent = doc.getValue();
+
+	const password = encryptKey;
+
+	const encryptedTitle = encrypt(noteTitle || '', password);
+	const encryptedContent = encrypt(noteContent, password);
+
+	const now = new Date();
+	const koreaTime = new Date(now.getTime() + (9 * 60 * 60 * 1000));
+	const encryptInfo = {
+		encryptedAt: koreaTime.toISOString(),
+		title: encryptedTitle
+	}
+	let newNoteContent = '---\n';
+	newNoteContent += `km-encrypted: true\n`;
+	newNoteContent += `encryptedAt: ${encryptInfo.encryptedAt}\n`;
+	newNoteContent += `title: ${encryptInfo.title}\n`;
+	newNoteContent += `---\n`;
+	newNoteContent += `${encryptedContent}`;
+
+	if (view.file) {	
+		await app.vault.modify(view.file, newNoteContent);
+	}
+
+	return {
+		status: 'success'
+	}
+}
+
+const checkIsMarkdownFile = (app: App) => {
+	const activeLeaf = app.workspace.getLeaf();
+	if (!activeLeaf) {
+		return false;
+	}
+
+	const view = activeLeaf.view;
+	if (!(view instanceof MarkdownView)) {
+		return false;
+	}
+
+	return true;
+}
+
+const onFileModify = (app: App) => {
+	// get appid
+	const activeLeaf = app.workspace.getLeaf();
+	if (!activeLeaf) {
+		return;
+	}
+
+	const view = activeLeaf.view;
+	if (!(view instanceof MarkdownView)) {
+		return;
+	}
+
+	const noteTitle = view.file?.basename;
+	const noteContent = view.editor.getDoc().getValue();
+
+	encryptedCacheDatas.title = noteTitle || '';
+	encryptedCacheDatas.content = noteContent;
 }
